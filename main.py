@@ -12,6 +12,14 @@ load_dotenv()
 
 app = FastAPI()
 
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://innobytedevelop.com"],  # mejor sin la ruta HTML
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
 VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
 PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
 openai.api_key = os.getenv("OPENAI_API_KEY")
@@ -169,16 +177,8 @@ async def recibir_mensaje(request: Request):
 
     return {"status": "ok"}
 
-from fastapi.middleware.cors import CORSMiddleware
 
-# Agrega CORS
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://innobytedevelop.com/agentes-inteligentes.html"],  # Puedes usar ["https"] en producción
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+
 
 # Endpoint para el frontend web
 @app.post("/chat")

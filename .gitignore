@@ -1,0 +1,14 @@
+# Entorno virtual
+venv/
+__pycache__/
+
+# Archivos sensibles
+.env
+
+# Archivos temporales
+*.zip
+*.log
+*.pyc
+
+# Otros
+.DS_Store

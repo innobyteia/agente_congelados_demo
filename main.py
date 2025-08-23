@@ -1,4 +1,5 @@
 from fastapi import FastAPI, Request
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from dotenv import load_dotenv
 import os
@@ -167,3 +168,71 @@ async def recibir_mensaje(request: Request):
         print("⚠️ Error procesando el mensaje:", e)
 
     return {"status": "ok"}
+
+from fastapi.middleware.cors import CORSMiddleware
+
+# Agrega CORS
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["https://innobytedevelop.com/agentes-inteligentes.html"],  # Puedes usar ["https"] en producción
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Endpoint para el frontend web
+@app.post("/chat")
+async def chat_web(request: Request):
+    data = await request.json()
+    texto = data.get("mensaje", "")
+    numero = "web_demo_user"
+    estado = ESTADOS.get(numero, {"fase": "inicio"})
+    resultado = interpretar_mensaje(texto)
+    intencion = resultado.get("intencion")
+
+    if intencion == "reset":
+        ESTADOS.pop(numero, None)
+        return {"respuesta": "✅ Conversación reiniciada. ¿Quieres ver el menú o hacer un pedido?"}
+
+    if estado["fase"] == "inicio":
+        ESTADOS[numero] = {"fase": "esperando_intencion"}
+        return {"respuesta": "👋 ¡Hola! Soy el agente demo de una tienda de congelados. ¿Quieres ver el menú, hacer un pedido o hablar con alguien?"}
+
+    if intencion == "menu":
+        productos = "\n".join([f"- {v['nombre']} - ${v['precio']}" for v in PRODUCTOS.values()])
+        return {"respuesta": "Nuestro menú:\n" + productos}
+
+    if intencion == "pedido":
+        productos_invalidos = [item["producto"] for item in resultado["items"] if item["producto"] not in PRODUCTOS]
+        if productos_invalidos:
+            return {"respuesta": f"😕 No reconocemos estos productos: {', '.join(productos_invalidos)}. Intenta de nuevo."}
+        ESTADOS[numero] = {"fase": "esperando_pago", "items": resultado["items"]}
+        return {"respuesta": "¿Deseas pagar con transferencia o en efectivo?"}
+
+    if intencion == "pago" and estado["fase"] == "esperando_pago":
+        estado["metodo"] = resultado.get("metodo")
+        resumen, total = "", 0
+        for item in estado["items"]:
+            nombre = item["producto"].lower()
+            cantidad = item["cantidad"]
+            prod = PRODUCTOS.get(nombre)
+            if prod:
+                subtotal = cantidad * prod["precio"]
+                resumen += f"{cantidad} x {prod['nombre']} = ${subtotal}\n"
+                total += subtotal
+        resumen += f"Método de pago: {estado['metodo']}\nTotal: ${total}"
+        ESTADOS[numero]["fase"] = "esperando_confirmacion"
+        return {"respuesta": "Este es el resumen de tu pedido:\n" + resumen + "\n¿Confirmas el pedido o deseas modificarlo?"}
+
+    if intencion == "confirmar" and estado["fase"] == "esperando_confirmacion":
+        ESTADOS.pop(numero, None)
+        return {"respuesta": "🎉 ¡Tu pedido ha sido confirmado! Gracias por comprar con nosotros."}
+
+    if intencion == "modificar":
+        ESTADOS[numero] = {"fase": "esperando_pago", "items": resultado["items"]}
+        return {"respuesta": "Entendido. ¿Deseas pagar con transferencia o en efectivo?"}
+
+    if intencion == "hablar":
+        return {"respuesta": "Un asesor se comunicará contigo pronto (simulado)."}
+
+    return {"respuesta": "Lo siento, no entendí eso 🤔. Puedes escribir:\n- 'Ver menú'\n- 'Quiero empanadas'\n- 'Pagar en efectivo'\n- 'Confirmar pedido'\n- 'Hablar con alguien'\n\nO escribe *reiniciar* para empezar de nuevo."}

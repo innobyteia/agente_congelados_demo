@@ -3,170 +3,127 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
-import os
-import requests
-import openai
-import json
-import unicodedata
-import time
+import os, requests, openai, json, time, logging, random, re
+from typing import Dict, List, Optional
+from datetime import datetime
 
+# ==== Setup ====
 load_dotenv()
+openai.api_key = os.getenv("OPENAI_API_KEY")
 
 app = FastAPI()
+app.add_middleware(CORSMiddleware, allow_origins=["*"], allow_credentials=True, allow_methods=["*"], allow_headers=["*"])
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("VendedorInteligente")
 
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["https://innobytedevelop.com"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
-
-VERIFY_TOKEN = os.getenv("VERIFY_TOKEN")
-PAGE_ACCESS_TOKEN = os.getenv("PAGE_ACCESS_TOKEN")
-openai.api_key = os.getenv("OPENAI_API_KEY")
-PHONE_NUMBER_ID = "700653199793289"
-
+# ==== Datos ====
 PRODUCTOS = {
-    "empanadas": {"nombre": "Empanadas", "precio": 1500},
-    "pasteles de pollo": {"nombre": "Pasteles de pollo", "precio": 2500},
-    "pasteles de arequipe": {"nombre": "Pasteles de arequipe", "precio": 2700},
-    "palitos de queso": {"nombre": "Palitos de queso", "precio": 1800},
-    "arepas rellenas": {"nombre": "Arepas rellenas", "precio": 2200},
-    "deditos de mozzarella": {"nombre": "Deditos de mozzarella", "precio": 2600},
-    "pizza personal": {"nombre": "Pizza personal", "precio": 5900},
+    "empanadas": {"nombre": "Empanadas", "precio": 1500, "descripcion": "Crujientes rellenas de carne o pollo"},
+    "pasteles de pollo": {"nombre": "Pasteles de pollo", "precio": 2500, "descripcion": "Suaves y con verduras frescas"},
+    "pizza personal": {"nombre": "Pizza personal", "precio": 5900, "descripcion": "Deliciosa pizza individual"},
 }
 
-ESTADOS = {}
+PROMOCIONES = ["🎉 Compra 10 empanadas y lleva 2 GRATIS!", "🔥 Pizza + deditos por $9,900"]
+SALUDOS = ["¡Hola! 😊 Bienvenido a Congelados Deliciosos. Soy tu Vendedor Inteligente.", "¡Qué gusto verte por aquí! 👋 Soy tu Vendedor Inteligente, listo para ayudarte."]
+DESPEDIDAS = ["¡Gracias por tu visita! Hasta pronto 😊", "¡Fue un placer ayudarte!"]
+ESTADOS: Dict[str, Dict] = {}
 
+# ==== Utilidades ====
+def get_time_emoji():
+    hour = datetime.now().hour
+    if hour < 12: return "☀️"
+    if hour < 18: return "🌤️"
+    return "🌙"
+
+def formatear_respuesta_web(mensaje: str):
+    return mensaje.replace("\n", "<br>")
+
+def extraer_productos_y_cantidades(texto: str) -> List[Dict]:
+    items = []
+    for producto in PRODUCTOS:
+        if producto in texto:
+            match = re.search(r"(\d+)\s+" + re.escape(producto), texto)
+            cantidad = int(match.group(1)) if match else 1
+            items.append({"producto": producto, "cantidad": cantidad})
+    return items
+
+# ==== LLM fallback para intenciones complejas ====
+def interpretar_mensaje_con_LLM(texto_usuario: str, estado_actual=None):
+    resumen = "\n".join([f"- {i['cantidad']} x {PRODUCTOS[i['producto']]['nombre']}" for i in estado_actual.get("items", [])]) if estado_actual else "Ninguno."
+    prompt = f"""
+Eres Tu Vendedor Inteligente, un asistente amable y profesional de congelados. Detecta la intención:
+Usuario dice: "{texto_usuario}"
+Pedido actual:
+{resumen}
+Devuelve solo JSON válido con:
+{{"intencion": "menu|pedido|saludo|despedida|pago|entrega|detalles_producto|recomendacion|no_entendido", "respuesta": "Texto conversacional con emojis."}}
+"""
+    try:
+        resp = openai.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "user", "content": prompt}],
+            temperature=0.7
+        )
+        return json.loads(resp.choices[0].message.content)
+    except Exception as e:
+        logger.error("LLM fallback error", exc_info=e)
+        return {"intencion": "no_entendido", "respuesta": "Lo siento 😅 ¿Puedes repetirlo?"}
+
+# ==== Endpoints ====
 class MensajeWeb(BaseModel):
     texto: str
     usuario_id: str
 
-def limpiar_estados_antiguos():
-    ahora = time.time()
-    usuarios_a_eliminar = [k for k, v in ESTADOS.items() if ahora - v.get("timestamp", 0) > 3600]
-    for k in usuarios_a_eliminar:
-        ESTADOS.pop(k, None)
-
-def formatear_respuesta_web(mensaje):
-    return mensaje.replace("\n", "<br>")
-
-def interpretar_mensaje(texto_usuario, estado_actual=None):
-    resumen_pedido = ""
-    if estado_actual and "items" in estado_actual:
-        resumen_pedido = "\n".join([
-            f"- {item['cantidad']} x {PRODUCTOS[item['producto']]['nombre']}"
-            for item in estado_actual["items"]
-            if item["producto"] in PRODUCTOS
-        ])
-    else:
-        resumen_pedido = "Sin pedido aún."
-
-    historia_conversacion = estado_actual.get("historia", [])[-5:] if estado_actual else []
-    contexto_historia = "\n".join(historia_conversacion) if historia_conversacion else "Sin historia previa."
-
-    prompt = f"""
-Eres un asistente inteligente y amigable llamado FrostyBot, para una tienda de productos congelados llamada 'Congelados Deliciosos'. Tu personalidad es entusiasta, útil y conversacional: usa emojis 😊, preguntas abiertas para mantener el flujo, y siempre intenta vender o recomendar productos de forma natural. Responde en español, de manera corta y atractiva (máximo 150 palabras por respuesta, a menos que sea un menú o resumen).
-
-Objetivo: Interpretar el mensaje del cliente, detectar la intención principal y generar una respuesta conversacional. Usa el contexto del pedido y la historia para personalizar. Si la pregunta es off-topic, redirige suavemente al tema de la tienda.
-
-### Información de la tienda:
-- Productos disponibles: {json.dumps(PRODUCTOS, ensure_ascii=False)}
-- Descripciones detalladas: Empanadas (rellenas de carne o pollo, crujientes); Pasteles de pollo (con verduras frescas); Pasteles de arequipe (dulces y cremosos); Palitos de queso (perfectos para snacks); Arepas rellenas (con queso y jamón); Deditos de mozzarella (fundidos y deliciosos); Pizza personal (variedades: pepperoni, hawaiana, vegetariana).
-- Políticas: Envíos en 1-2 días en la ciudad, pago por transferencia o efectivo. Promociones: Compra 10 empanadas y lleva 2 gratis. Ingredientes: Sin conservantes artificiales, apto para alérgenos.
-- Horarios: Abierto 24/7 online, entregas de 8am-8pm.
-
-### Historia de la conversación:
-{contexto_historia}
-
-### Pedido actual:
-{resumen_pedido}
-
-### Mensaje del cliente:
-"{texto_usuario}"
-
-Devuelve SOLO un JSON con:
-- "intencion": e.g., "menu", "pedido", "agregar", etc.
-- "items": [] si aplica
-- "productos": [] si aplica
-- "metodo": ""
-- "tema": ""
-- "detalles": ""
-- "respuesta": "Texto conversacional generado"
-"""
-    respuesta = openai.chat.completions.create(
-        model="gpt-4o",
-        messages=[
-            {"role": "system", "content": "Eres un asistente preciso que siempre devuelve JSON válido."},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=0.7,
-        max_tokens=500
-    )
-    try:
-        json_res = json.loads(respuesta.choices[0].message.content)
-        if estado_actual is not None:
-            estado_actual.setdefault("historia", []).append(f"Cliente: {texto_usuario}")
-            estado_actual["historia"].append(f"Bot: {json_res.get('respuesta', '')}")
-        return json_res
-    except Exception as e:
-        print("⚠️ Error parseando JSON del LLM:", e)
-        return {"intencion": "no_entendido", "respuesta": "Lo siento, no entendí. ¿Puedes repetirlo? 😅"}
-
 @app.post("/webhook/demo")
 async def webhook_demo(mensaje: MensajeWeb):
-    limpiar_estados_antiguos()
-    try:
-        uid = mensaje.usuario_id
-        texto = mensaje.texto.strip()
-        if uid not in ESTADOS:
-            ESTADOS[uid] = {"fase": "inicio", "timestamp": time.time()}
+    uid = mensaje.usuario_id
+    texto = mensaje.texto.strip().lower()
+    if uid not in ESTADOS:
+        ESTADOS[uid] = {"items": [], "historia": [], "timestamp": time.time(), "metodo": None, "entrega": None}
+    estado = ESTADOS[uid]
 
-        estado = ESTADOS[uid]
-        resultado = interpretar_mensaje(texto, estado_actual=estado)
-        intencion = resultado.get("intencion")
-        respuesta = resultado.get("respuesta", "Lo siento, no entendí. ¿Puedes repetirlo? 😅")
+    if texto in ["hola", "buenos días", "buenas", "hey"]:
+        respuesta = random.choice(SALUDOS) + f" {random.choice(PROMOCIONES)}"
+        return {"respuesta": formatear_respuesta_web(respuesta), "estado": "saludo"}
 
-        if intencion == "pedido":
-            estado["items"] = resultado.get("items", [])
-            estado["fase"] = "esperando_pago"
+    if "menú" in texto or "productos" in texto:
+        productos = "\n".join([f"• {p['nombre']} - ${p['precio']:,}" for p in PRODUCTOS.values()])
+        return {"respuesta": formatear_respuesta_web(f"Aquí va nuestro menú 🧊:\n\n{productos}"), "estado": "menu"}
 
-        elif intencion == "agregar":
-            nuevos = resultado.get("items", [])
-            estado.setdefault("items", [])
-            for n in nuevos:
-                ex = next((i for i in estado["items"] if i["producto"] == n["producto"]), None)
-                if ex:
-                    ex["cantidad"] += n["cantidad"]
-                else:
-                    estado["items"].append(n)
+    if "gracias" in texto or "chao" in texto:
+        return {"respuesta": formatear_respuesta_web(random.choice(DESPEDIDAS)), "estado": "despedida"}
 
-        elif intencion == "modificar":
-            mods = resultado.get("items", [])
-            for mod in mods:
-                for i in estado.get("items", []):
-                    if i["producto"] == mod["producto"]:
-                        i["cantidad"] = mod["cantidad"]
+    items = extraer_productos_y_cantidades(texto)
+    if items:
+        total = sum(i["cantidad"] * PRODUCTOS[i["producto"]]["precio"] for i in items)
+        estado["items"].extend(items)
+        respuesta = "🛒 Pedido actualizado:\n" + "\n".join([f"- {i['cantidad']} x {PRODUCTOS[i['producto']]['nombre']} = ${i['cantidad'] * PRODUCTOS[i['producto']]['precio']:,}" for i in items])
+        return {"respuesta": formatear_respuesta_web(respuesta + f"\nTotal: ${total:,}\n¿Deseas algo más?"), "estado": "pedido"}
 
-        elif intencion == "eliminar":
-            eliminar = resultado.get("productos", [])
-            estado["items"] = [i for i in estado.get("items", []) if i["producto"] not in eliminar]
+    resultado = interpretar_mensaje_con_LLM(texto, estado_actual=estado)
+    intencion = resultado.get("intencion")
 
-        elif intencion == "pago":
-            estado["metodo"] = resultado.get("metodo", "")
-            estado["fase"] = "esperando_confirmacion"
+    if intencion == "entrega":
+        estado["entrega"] = "domicilio"
+        link_politica = "https://congelados-demo.com/politica-datos"
+        return {"respuesta": formatear_respuesta_web(
+            f"📦 Perfecto. Para envío a domicilio, protegemos tus datos según nuestra política: {link_politica}\nAlguien del equipo se pondrá en contacto para confirmar y despachar tu pedido. ¡Gracias por tu compra! 🎉"),
+            "estado": "entrega_confirmada"}
 
-        elif intencion == "confirmar":
-            ESTADOS.pop(uid, None)
+    if intencion == "pago":
+        estado["metodo"] = "transferencia"
+        return {"respuesta": formatear_respuesta_web("💳 Puedes pagar por transferencia o en efectivo. ¿Qué prefieres?"), "estado": "pago"}
 
-        return {"respuesta": formatear_respuesta_web(respuesta), "estado": intencion or "esperando"}
-
-    except Exception as e:
-        print(f"⚠️ Error en demo: {e}")
-        return {"respuesta": formatear_respuesta_web("Lo siento, hubo un error. Intenta de nuevo."), "estado": "error"}
+    estado["historia"].append(f"Cliente: {texto}")
+    estado["historia"].append(f"Bot: {resultado.get('respuesta')}")
+    return {"respuesta": formatear_respuesta_web(resultado["respuesta"]), "estado": intencion or "no_entendido"}
 
 @app.post("/webhook/demo/reset")
-async def reset_demo(usuario_id: str):
-    ESTADOS.pop(usuario_id, None)
-    return {"status": "reset", "message": "Conversación reiniciada"}
+async def reset(uid: str):
+    ESTADOS.pop(uid, None)
+    return {"status": "ok"}
+
+@app.get("/")
+async def root():
+    return {"message": "Tu Vendedor Inteligente está activo 🤖"}
+

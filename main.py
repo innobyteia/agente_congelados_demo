@@ -134,10 +134,15 @@ async def webhook_demo(mensaje: MensajeWeb):
     limpiar_estados_antiguos()
     try:
         usuario_id = mensaje.usuario_id
-        texto = mensaje.texto
+        texto = mensaje.texto.strip().lower()
+
+        # Inicializa estado si es la primera vez
         if usuario_id not in ESTADOS:
             ESTADOS[usuario_id] = {"fase": "inicio", "timestamp": time.time()}
-            return {"respuesta": formatear_respuesta_web("¡Hola! 👋 Bienvenido a nuestra tienda de congelados. ¿Te gustaría ver el menú?"), "estado": "nuevo"}
+
+        # Respuesta especial si el mensaje es solo un saludo
+        if texto in ["hola", "buenas", "buenos días", "buenas tardes", "buenas noches"]:
+            return {"respuesta": formatear_respuesta_web("¡Hola! 👋 ¿Te gustaría ver el menú o hacer un pedido?"), "estado": "saludo"}
 
         estado = ESTADOS[usuario_id]
         resultado = interpretar_mensaje(texto)
@@ -155,7 +160,7 @@ async def webhook_demo(mensaje: MensajeWeb):
                 prod = PRODUCTOS.get(item["producto"])
                 if prod:
                     resumen += f"{item['cantidad']} x {prod['nombre']} - ${item['cantidad'] * prod['precio']}\n"
-            return {"respuesta": formatear_respuesta_web(f"{resumen}\n¿Cómo deseas pagar? (transferencia/efectivo)"), "estado": "esperando_pago"}
+            return {"respuesta": formatear_respuesta_web(f"{resumen}\n¿Cómo deseas pagar? (transferencia/efectivo)?"), "estado": "esperando_pago"}
 
         elif intencion == "confirmar":
             ESTADOS.pop(usuario_id, None)
@@ -174,6 +179,8 @@ async def webhook_demo(mensaje: MensajeWeb):
     except Exception as e:
         print(f"Error en demo: {e}")
         return {"respuesta": formatear_respuesta_web("Lo siento, hubo un error. Intenta de nuevo."), "estado": "error"}
+
+
 
 @app.post("/webhook/demo/reset")
 async def reset_demo(usuario_id: str):

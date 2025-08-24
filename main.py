@@ -89,41 +89,60 @@ def enviar_mensaje(numero, mensaje):
     response = requests.post(url, headers=headers, json=data)
     print("🔁 Enviado:", response.status_code, response.text)
 
-def interpretar_mensaje(texto_usuario):
+def interpretar_mensaje(texto_usuario, estado_actual=None):
+    resumen_pedido = ""
+    if estado_actual and "items" in estado_actual:
+        resumen_pedido = "\n".join([
+            f"- {item['cantidad']} x {PRODUCTOS[item['producto']]['nombre']}"
+            for item in estado_actual["items"]
+            if item["producto"] in PRODUCTOS
+        ])
+    else:
+        resumen_pedido = "Sin pedido aún."
+
     prompt = f"""
-Eres un asistente conversacional amable, empático y profesional para una tienda de congelados. Tu objetivo es ayudar al cliente a hacer pedidos, ver el menú, resolver dudas o redirigir de forma cordial temas que no tengan que ver con la tienda.
+Actúas como un asistente de una tienda de productos congelados. Tu tarea es interpretar el mensaje del cliente y devolver un JSON con la intención detectada. Usa el contexto del pedido si existe.
 
-Productos disponibles: {', '.join(PRODUCTOS.keys())}
+### Pedido actual:
+{resumen_pedido}
 
-Mensaje del cliente: \"{texto_usuario}\"
+### Mensaje del cliente:
+"{texto_usuario}"
 
-Responde solo con un JSON que indique la intención:
+Devuelve SOLO un JSON. Las posibles intenciones son:
+
 - Ver menú:
-  {{"intencion": "menu"}}
-- Hacer pedido:
-  {{"intencion": "pedido", "items": [{{"producto": "empanadas", "cantidad": 5}}]}}
+  {{ "intencion": "menu" }}
+- Hacer nuevo pedido:
+  {{ "intencion": "pedido", "items": [{{"producto": "empanadas", "cantidad": 2}}] }}
+- Agregar productos:
+  {{ "intencion": "agregar", "items": [{{"producto": "churros", "cantidad": 1}}] }}
+- Modificar cantidades:
+  {{ "intencion": "modificar", "items": [{{"producto": "empanadas", "cantidad": 3}}] }}
+- Eliminar productos:
+  {{ "intencion": "eliminar", "productos": ["nuggets"] }}
 - Confirmar pedido:
-  {{"intencion": "confirmar"}}
-- Modificar pedido:
-  {{"intencion": "modificar", "items": [{{"producto": "empanadas", "cantidad": 2}}]}}
+  {{ "intencion": "confirmar" }}
 - Elegir método de pago:
-  {{"intencion": "pago", "metodo": "efectivo"}}
-- Pedir hablar con alguien:
-  {{"intencion": "hablar"}}
-- Tema fuera de contexto:
-  {{"intencion": "fuera_de_contexto", "tema": "vacaciones"}}
+  {{ "intencion": "pago", "metodo": "efectivo" }}
+- Hablar con humano:
+  {{ "intencion": "hablar" }}
+- Pregunta fuera de contexto:
+  {{ "intencion": "fuera_de_contexto", "tema": "vacaciones" }}
 - No se entiende:
-  {{"intencion": "no_entendido"}}
+  {{ "intencion": "no_entendido" }}
 """
     respuesta = openai.chat.completions.create(
         model="gpt-4",
         messages=[{"role": "user", "content": prompt}],
-        temperature=0.7
+        temperature=0.5
     )
     try:
         return json.loads(respuesta.choices[0].message.content)
-    except:
+    except Exception as e:
+        print("⚠️ Error parseando JSON del LLM:", e)
         return {"intencion": "no_entendido"}
+
 
 class MensajeWeb(BaseModel):
     texto: str
@@ -135,17 +154,15 @@ async def webhook_demo(mensaje: MensajeWeb):
     try:
         usuario_id = mensaje.usuario_id
         texto = mensaje.texto.strip().lower()
-
-        # Inicializa estado si es la primera vez
         if usuario_id not in ESTADOS:
             ESTADOS[usuario_id] = {"fase": "inicio", "timestamp": time.time()}
 
-        # Respuesta especial si el mensaje es solo un saludo
+        # Saludo inicial manual
         if texto in ["hola", "buenas", "buenos días", "buenas tardes", "buenas noches"]:
             return {"respuesta": formatear_respuesta_web("¡Hola! 👋 ¿Te gustaría ver el menú o hacer un pedido?"), "estado": "saludo"}
 
         estado = ESTADOS[usuario_id]
-        resultado = interpretar_mensaje(texto)
+        resultado = interpretar_mensaje(texto, estado_actual=estado)
         intencion = resultado.get("intencion")
 
         if intencion == "menu":
@@ -154,13 +171,71 @@ async def webhook_demo(mensaje: MensajeWeb):
 
         elif intencion == "pedido":
             items = resultado.get("items", [])
-            ESTADOS[usuario_id] = {"fase": "esperando_pago", "items": items, "timestamp": time.time()}
+            estado["fase"] = "esperando_pago"
+            estado["items"] = items
+            estado["timestamp"] = time.time()
             resumen = "Tu pedido:\n"
             for item in items:
                 prod = PRODUCTOS.get(item["producto"])
                 if prod:
                     resumen += f"{item['cantidad']} x {prod['nombre']} - ${item['cantidad'] * prod['precio']}\n"
             return {"respuesta": formatear_respuesta_web(f"{resumen}\n¿Cómo deseas pagar? (transferencia/efectivo)?"), "estado": "esperando_pago"}
+
+        elif intencion == "agregar":
+            nuevos_items = resultado.get("items", [])
+            if "items" not in estado:
+                estado["items"] = []
+            for nuevo in nuevos_items:
+                ya_existe = next((i for i in estado["items"] if i["producto"] == nuevo["producto"]), None)
+                if ya_existe:
+                    ya_existe["cantidad"] += nuevo["cantidad"]
+                else:
+                    estado["items"].append(nuevo)
+            resumen = "Pedido actualizado:\n"
+            for item in estado["items"]:
+                prod = PRODUCTOS.get(item["producto"])
+                if prod:
+                    resumen += f"{item['cantidad']} x {prod['nombre']} - ${item['cantidad'] * prod['precio']}\n"
+            return {"respuesta": formatear_respuesta_web(f"{resumen}\n¿Deseas pagar ahora o agregar más productos?"), "estado": "esperando_pago"}
+
+        elif intencion == "modificar":
+            modificaciones = resultado.get("items", [])
+            for mod in modificaciones:
+                for item in estado.get("items", []):
+                    if item["producto"] == mod["producto"]:
+                        item["cantidad"] = mod["cantidad"]
+            resumen = "Pedido modificado:\n"
+            for item in estado["items"]:
+                prod = PRODUCTOS.get(item["producto"])
+                if prod:
+                    resumen += f"{item['cantidad']} x {prod['nombre']} - ${item['cantidad'] * prod['precio']}\n"
+            return {"respuesta": formatear_respuesta_web(f"{resumen}\n¿Confirmas el pedido o deseas hacer más cambios?"), "estado": "esperando_pago"}
+
+        elif intencion == "eliminar":
+            productos_a_eliminar = resultado.get("productos", [])
+            estado["items"] = [item for item in estado.get("items", []) if item["producto"] not in productos_a_eliminar]
+            resumen = "Pedido actualizado:\n"
+            for item in estado["items"]:
+                prod = PRODUCTOS.get(item["producto"])
+                if prod:
+                    resumen += f"{item['cantidad']} x {prod['nombre']} - ${item['cantidad'] * prod['precio']}\n"
+            if not estado["items"]:
+                resumen += "Sin productos en el pedido."
+            return {"respuesta": formatear_respuesta_web(f"{resumen}\n¿Deseas agregar algo más?"), "estado": "esperando_pago"}
+
+        elif intencion == "pago":
+            metodo = resultado.get("metodo", "sin especificar")
+            estado["metodo"] = metodo
+            resumen = "Resumen de tu pedido:\n"
+            total = 0
+            for item in estado.get("items", []):
+                prod = PRODUCTOS.get(item["producto"])
+                if prod:
+                    subtotal = item["cantidad"] * prod["precio"]
+                    total += subtotal
+                    resumen += f"{item['cantidad']} x {prod['nombre']} = ${subtotal}\n"
+            resumen += f"Método de pago: {metodo}\nTotal: ${total}"
+            return {"respuesta": formatear_respuesta_web(f"{resumen}\n¿Confirmas el pedido?"), "estado": "esperando_confirmacion"}
 
         elif intencion == "confirmar":
             ESTADOS.pop(usuario_id, None)
@@ -177,7 +252,7 @@ async def webhook_demo(mensaje: MensajeWeb):
             return {"respuesta": formatear_respuesta_web("No entendí. ¿Quieres ver el menú o hacer un pedido?"), "estado": "esperando"}
 
     except Exception as e:
-        print(f"Error en demo: {e}")
+        print(f"⚠️ Error en demo: {e}")
         return {"respuesta": formatear_respuesta_web("Lo siento, hubo un error. Intenta de nuevo."), "estado": "error"}
 
 

@@ -43,7 +43,7 @@ NUM_PALABRAS = {
     "un": 1, "uno": 1, "una": 1,
     "dos": 2, "tres": 3, "cuatro": 4, "cinco": 5,
     "seis": 6, "siete": 7, "ocho": 8, "nueve": 9, "diez": 10,
-    "docena": 12, "una docena": 12
+    "docena": 12, "una docena": 12, "media docena": 6
 }
 
 PROMOCIONES = [
@@ -55,7 +55,7 @@ PROMOCIONES = [
 
 DESPEDIDAS = [
     "¡Gracias por tu visita! Hasta pronto 😊",
-    "¡Fue un placer ayudarte! 💫 ¡Vuelve pronto!",
+    "¡Fue un placer ayudarte! ¡Vuelve pronto!",
     "¡Nos vemos! 🌈 Que tengas un día delicioso.",
     "¡Hasta luego! 🎯 Espero verte de nuevo pronto."
 ]
@@ -73,13 +73,29 @@ def get_time_emoji() -> str:
     return "🌙"
 
 def saludo_dinamico() -> str:
-    opciones = [
-        f"¡Hola! {get_time_emoji()} Bienvenido a Congelados Deliciosos. Soy tu Vendedor Inteligente.",
-        f"¡Qué gusto verte por aquí! 👋 {get_time_emoji()} ¿En qué puedo ayudarte hoy?",
-        f"¡Hola! 🌟 Estoy aquí para hacer tu experiencia deliciosa. {get_time_emoji()}",
-        f"¡Bienvenido! 🥟 {get_time_emoji()} ¿Listo para ordenar algo increíble?",
+    """Saludo natural sin promociones forzadas"""
+    emoji_tiempo = get_time_emoji()
+    
+    saludos_base = [
+        f"¡Hola! {emoji_tiempo} Bienvenido a Congelados Deliciosos",
+        f"¡Qué gusto verte por aquí! 👋 {emoji_tiempo}", 
+        f"¡Hola! 🌟 Me da mucho gusto saludarte {emoji_tiempo}",
+        f"¡Bienvenido! 🥟 {emoji_tiempo} ¿Cómo estás?"
     ]
-    return random.choice(opciones)
+    
+    saludo = random.choice(saludos_base)
+    
+    # Ocasionalmente mencionar promoción suavemente (30% probabilidad)
+    if random.random() < 0.3:
+        promocion = random.choice(PROMOCIONES)
+        return f"{saludo}. Por cierto, {promocion.lower()} ¿Te interesa?"
+    
+    return f"{saludo}. ¿En qué puedo ayudarte hoy?"
+
+def generar_respuesta_promociones() -> str:
+    """Respuesta dedicada para cuando preguntan por promociones"""
+    promociones_texto = "\n".join([f"• {p}" for p in PROMOCIONES])
+    return f"¡Claro! Tenemos estas promociones 🎉:\n\n{promociones_texto}\n\n¿Alguna te llama la atención? 😊"
 
 def formatear_respuesta_web(mensaje: str) -> str:
     return mensaje.replace("\n", "<br>")
@@ -188,7 +204,7 @@ def generar_hash_texto(texto: str) -> str:
 def detectar_intencion_basica(texto: str) -> Optional[Dict]:
     t = texto.lower()
 
-    # Saludos mejorados
+    # Saludos mejorados - SIN promoción en el saludo
     saludos_patrones = [
         r'^(hola|hey|hi|hello|buen[oa]s(\s*(d[ií]as|tardes|noches))?)\b',
         r'\b(qu[eé]\s*tal|c[oó]mo\s*est[aá]s|saludos|buen[oa]s)\b',
@@ -197,7 +213,11 @@ def detectar_intencion_basica(texto: str) -> Optional[Dict]:
     
     for patron in saludos_patrones:
         if re.search(patron, t):
-            return {"intencion": "saludo", "respuesta": f"{saludo_dinamico()} {random.choice(PROMOCIONES)}"}
+            return {"intencion": "saludo", "respuesta": saludo_dinamico()}  # ← SOLO saludo, sin promoción
+
+    # Nueva detección para promociones específicas
+    if re.search(r'\b(promociones?|ofertas?|descuentos?|especiales)\b', t):
+        return {"intencion": "promociones", "respuesta": generar_respuesta_promociones()}
 
     # Menú / catálogo
     if re.search(r'\b(men[úu]|menu|productos|cat[aá]logo|qu[eé]\s*(tienes|vendes)|oferta|ofertas)\b', t):
